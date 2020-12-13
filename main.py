@@ -41,12 +41,16 @@ parser = argparse.ArgumentParser(description="Train the Net",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
 parser.add_argument("--lr", default=1e-3, type=float, dest="lr")
-parser.add_argument("--momentum", default=0.9, type=float, dest="lr")
-parser.add_argument("--weight_decay", default=1e-4, type=float, dest="lr")
+parser.add_argument("--momentum", default=0.9, type=float, dest="momentum")
+parser.add_argument("--weight_decay", default=1e-4, type=float, dest="weight_decay")
+parser.add_argument("--current_best", default=1e20, type=float, dest="current_best")
 parser.add_argument("--batch_size", default=8, type=int, dest="batch_size")
-parser.add_argument("--num_epoch", default=100, type=int, dest="num_epoch")
+parser.add_argument("--num_epoch", default=30, type=int, dest="num_epoch")
 
-parser.add_argument("--data_dir", default="/home/kerrykim/PycharmProjects/eyetracking_origin/dataset/", type=str, dest="data_dir")
+parser.add_argument("--imSize", default=(224,224), type=int, dest="imSize")
+parser.add_argument("--gridSize", default=(25,25), type=int, dest="gridSize")
+
+parser.add_argument("--data_dir", default="/home/kerrykim/PycharmProjects/eyetracking_data/dataset_small/", type=str, dest="data_dir")
 parser.add_argument("--ckpt_dir", default="./checkpoint", type=str, dest="ckpt_dir")
 parser.add_argument("--log_dir", default="./log", type=str, dest="log_dir")
 parser.add_argument("--result_dir", default="./result", type=str, dest="result_dir")
@@ -60,11 +64,15 @@ args, unknown = parser.parse_known_args()
 lr = args.lr
 momentum = args.momentum
 weight_decay = args.weight_decay
-batch_size = args.batch_size
+current_best = args.current_best
+batch_size = args.batch_size    # torch.cuda.device_count()*100 # Change if out of cuda memory
 num_epoch = args.num_epoch
 
+imSize=args.imSize
+gridSize=args.gridSize
+
 '''
-data_dir = '/home/kerrykim/PycharmProjects/eyetracking_origin/dataset/'
+data_dir = '/home/kerrykim/PycharmProjects/eyetracking_data/dataset_small/'
 ckpt_dir = './checkpoint'
 log_dir = './log'
 result_dir = './result'
@@ -78,29 +86,23 @@ result_dir = args.result_dir
 mode = args.mode
 train_continue = args.train_continue
 
-imSize=(224,224)
-gridSize=(25,25)
-current_best = 1e20
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print("learning rate: %.4e" % lr)
+print("momentum: %.4e" % momentum)
+print("weight_decay: %.4e" % weight_decay)
 print("batch size: %d" % batch_size)
 print("number of epoch: %d" % num_epoch)
-print("data dir: %s" % data_dir)
-print("ckpt dir: %s" % ckpt_dir)
-print("log dir: %s" % log_dir)
-print("result dir: %s" % result_dir)
 print("train/test_mode: %s" % mode)
 
 ## define train/test dataloader
 if mode == 'train':
 
     dataset_train = Dataset(data_dir=data_dir, split='train', imSize=imSize, gridSize=gridSize)
-    loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_momory=True)
+    loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
     dataset_val = Dataset(data_dir=data_dir, split='val', imSize=imSize, gridSize=gridSize)
-    loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=8, pin_momory=True)
+    loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
     num_data_train = len(dataset_train)
     num_data_val = len(dataset_val)
@@ -135,7 +137,6 @@ fn_class = lambda x: 1.0 * (x > 0.5)
 
 def flatten(lst):
     result = []
-    result = []
     for item in lst:
         result.extend(item)
     return result
@@ -155,18 +156,21 @@ if mode == 'train':
         # learning rate decay
         adjust_learning_rate(lr=lr, optim=optim, epoch=epoch)
 
-        print(lr)
+        print('lr :', lr)
 
         net.train()
         loss_batch_arr = []
         loss_epoch_arr = []
 
-        for batch, input, label in enumerate(loader_train, 1):
+        for batch, (imFace, imEyeL, imEyeR, faceGrid, label) in enumerate(loader_train, 1):
             # forward pass
             label = label.to(device)
-            input = input.to(device)
+            imFace = imFace.to(device)
+            imEyeL = imEyeL.to(device)
+            imEyeR = imEyeR.to(device)
+            faceGrid = faceGrid.to(device)
 
-            output = net(input)
+            output = net(imFace, imEyeL, imEyeR, faceGrid)
 
             # backward pass
             optim.zero_grad()
@@ -190,11 +194,14 @@ if mode == 'train':
             loss_batch_arr = []
             loss_epoch_arr = []
 
-            for batch, input, label in enumerate(loader_val, 1):
+            for batch, (imFace, imEyeL, imEyeR, faceGrid, label) in enumerate(loader_val, 1):
                 label = label.to(device)
-                input = input.to(device)
+                imFace = imFace.to(device)
+                imEyeL = imEyeL.to(device)
+                imEyeR = imEyeR.to(device)
+                faceGrid = faceGrid.to(device)
 
-                output = net(input)
+                output = net(imFace, imEyeL, imEyeR, faceGrid)
 
                 loss = fn_loss(output, label)       # source code는 loss가 다름
 
@@ -226,10 +233,13 @@ else:
         net.eval()
         pred = []
 
-        for batch, input in enumerate(loader_test, 1):
-            input = input.to(device)
+        for batch, (imFace, imEyeL, imEyeR, faceGrid, label) in enumerate(loader_test, 1):
+            imFace = imFace.to(device)
+            imEyeL = imEyeL.to(device)
+            imEyeR = imEyeR.to(device)
+            faceGrid = faceGrid.to(device)
 
-            output = net(input)
+            output = net(imFace, imEyeL, imEyeR, faceGrid)
             output = fn_tonumpy(output)
             output = flatten(output)
             pred.append(output)
@@ -239,3 +249,6 @@ else:
 
 
         # 비교하고 싶으면 pred와 label과 비교...
+
+##
+
